@@ -23,17 +23,18 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.logging.Level;
-import java.util.logging.Logger;
-
-import org.apache.commons.httpclient.Credentials;
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.UsernamePasswordCredentials;
-import org.apache.commons.httpclient.methods.EntityEnclosingMethod;
-import org.apache.commons.httpclient.methods.PostMethod;
 
 import de.lohndirekt.print.exception.AuthenticationException;
-
+import org.apache.http.HttpEntity;
+import org.apache.http.auth.AuthScope;
+import org.apache.http.auth.Credentials;
+import org.apache.http.auth.UsernamePasswordCredentials;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.InputStreamEntity;
+import org.apache.http.impl.client.BasicCredentialsProvider;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
 
 /**
  * simple facade / abstraction layer to "commons httpclient"
@@ -42,69 +43,44 @@ import de.lohndirekt.print.exception.AuthenticationException;
  *  
  */
 class IppHttpConnection implements IppConnection {
+    private final Credentials credentials;
+    private int statusCode;
 
-    private Logger log = Logger.getLogger(this.getClass().getName());
-
-    private HttpClient httpConn;
-
-    private PostMethod method;
+    private final HttpPost method;
 
     /**
      * @param uri
      * @param user
      * @param passwd
-     * @param useStream
      */
-    public IppHttpConnection(URI uri, String user, String passwd) {
-        try {
-            httpConn = new HttpClient();
-            method = new PostMethod(toHttpURI(uri).toString());
-            method.addRequestHeader("Content-type", "application/ipp");
-            method.addRequestHeader("Accept", "text/html, image/gif, image/jpeg, *; q=.2, */*; q=.2");
-            method.setRequestContentLength(EntityEnclosingMethod.CONTENT_LENGTH_AUTO);
-            // authentication
-            if (user != null && user.trim().length() > 0) {
-                if (log.isLoggable(Level.FINER)) {
-                    log.log(Level.SEVERE, "Using username: "+user+" , passwd.length "+passwd.length());
-                }
-                method.setDoAuthentication(true);
-                Credentials creds = new UsernamePasswordCredentials(user,
-                        passwd);
-                httpConn.getState().setCredentials(null,
-                        toHttpURI(uri).getHost(), creds);
-                
-            }
-            
-        } catch (Exception e) {
-            log.log(Level.SEVERE, e.getMessage(), e);
-        }
+    public IppHttpConnection(final URI uri, final String user, final String passwd) {
+        this.credentials = new UsernamePasswordCredentials(user, passwd);
+        method = new HttpPost(toHttpURI(uri).toString());
+        method.addHeader("Content-type", "application/ipp");
+        method.addHeader("Accept", "text/html, image/gif, image/jpeg, *; q=.2, */*; q=.2");
     }
 
-    
     /**
      * @return content of the response
      * @throws IOException
      */
     public InputStream getIppResponse() throws IOException {
-        return method.getResponseBodyAsStream();
+        return method.getEntity().getContent();
     }
 
     /**
      * @return the statuscode of last request
      * @throws IOException
      */
-    public int getStatusCode() throws IOException {
-        return method.getStatusCode();
+    public int getStatusCode() {
+        return statusCode;
     }
 
-    private static URI toHttpURI(URI uri) {
+    private static URI toHttpURI(final URI uri) {
         if (uri.getScheme().equals("ipp")) {
-            String uriString = uri.toString().replaceFirst("ipp", "http");
-            // TODO remove this hack!
-//            uriString = uriString.replaceAll("(\\d{1,3}\\.){3}\\d{1,3}:\\d{1,}", "127.0.0.1:631");
-            // endof hack
+            final String uriString = uri.toString().replaceFirst("ipp", "http");
             try {
-                uri = new URI(uriString);
+               return new URI(uriString);
             } catch (URISyntaxException e) {
                 throw new RuntimeException("toHttpURI buggy? : uri was " + uri);
             }
@@ -115,20 +91,24 @@ class IppHttpConnection implements IppConnection {
     /**
      * @param stream
      */
-    public void setIppRequest(InputStream stream) {
-        method.setRequestBody(stream);
+    public void setIppRequest(final InputStream stream) {
+        final HttpEntity inputStreamRequestEntity = new InputStreamEntity(stream);
+        method.setEntity(inputStreamRequestEntity);
     }
     
-    public boolean execute() throws IOException {
-        if (this.method.validate()) {
-            httpConn.executeMethod(method);
-            if (this.getStatusCode()==HttpURLConnection.HTTP_UNAUTHORIZED) {
-                throw new AuthenticationException(method.getStatusText());
+    public boolean execute() {
+        final BasicCredentialsProvider credentialsProvider = new BasicCredentialsProvider();
+        credentialsProvider.setCredentials(AuthScope.ANY, credentials);
+        try (CloseableHttpClient httpConn = HttpClientBuilder.create().setDefaultCredentialsProvider(credentialsProvider).build()) {
+            try (CloseableHttpResponse response = httpConn.execute(method)){
+                this.statusCode = response.getStatusLine().getStatusCode();
+                if (this.statusCode == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                    throw new AuthenticationException(response.getStatusLine().getReasonPhrase());
+                }
             }
             return true;
-        } else {
+        } catch (IOException e){
             return false;
         }
     }
-
 }
